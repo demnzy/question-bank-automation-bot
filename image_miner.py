@@ -7,50 +7,59 @@ import pandas as pd
 from fuzzywuzzy import fuzz
 
 # --- 1. UPLOAD FUNCTION (Custom API) ---
+import sys
+import json
+import os
+import fitz  # PyMuPDF
+import requests
+import pandas as pd
+import cloudscraper  # <--- NEW IMPORT
+from fuzzywuzzy import fuzz
+
+# --- 1. UPLOAD FUNCTION (Cloudflare Bypass Edition) ---
 def upload_image_api(image_bytes, filename):
-    # YOUR CUSTOM API URL
-    url = "https://devbackend.succeedquiz.com/api/v1/upload"
+    url = "https://backend.succeedquiz.com/api/v1/upload"
     
-    # READ TOKEN FROM SECRET (Security Best Practice)
     token = os.environ.get("SUCCEED_API_TOKEN")
     
     if not token:
-        print("Error: SUCCEED_API_TOKEN not found in environment variables.")
+        print("Error: SUCCEED_API_TOKEN not found.")
         return None
     
+    # 1. CREATE A SCRAPER INSTANCE (Impersonates a Browser)
+    scraper = cloudscraper.create_scraper()
+
     headers = {
         'Authorization': f'Bearer {token}'
     }
 
-    # API CONFIGURATION
     files = [
-        ('File', (filename, image_bytes, 'image/png')) 
+        ('file', (filename, image_bytes, 'image/png')) 
     ]
 
     try:
-        response = requests.post(url, headers=headers, files=files)
+        # 2. USE SCRAPER.POST INSTEAD OF REQUESTS.POST
+        response = scraper.post(url, headers=headers, files=files)
         
+        # Check if we still got the Cloudflare HTML challenge (just in case)
+        if "<!DOCTYPE html>" in response.text and "Just a moment" in response.text:
+            print("  -> Error: Cloudflare blocked the scraper. API access requires whitelisting.")
+            return None
+
         if response.status_code == 200 or response.status_code == 201:
-            # TRY TO EXTRACT URL
-            # Adjust this based on the exact JSON structure of your API
             data = response.json()
             
-            # Pattern 1: { "url": "..." }
             if 'url' in data: return data['url']
-            
-            # Pattern 2: { "data": { "url": "..." } }
             if 'data' in data and isinstance(data['data'], dict):
                 if 'url' in data['data']: return data['data']['url']
                 if 'link' in data['data']: return data['data']['link']
-            
-            # Pattern 3: { "secure_url": "..." }
             if 'secure_url' in data: return data['secure_url']
 
             print(f"  -> Uploaded, but couldn't find URL key in: {data}")
             return None
             
         else:
-            print(f"  -> API Error ({response.status_code}): {response.text}")
+            print(f"  -> API Error ({response.status_code}): {response.text[:200]}...")
             return None
             
     except Exception as e:
