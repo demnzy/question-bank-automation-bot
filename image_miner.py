@@ -8,7 +8,7 @@ from fuzzywuzzy import fuzz
 
 # --- CONFIGURATION ---
 # Updated based on your successful login logs
-LOGIN_URL = "https://devbackend.succeedquiz.com/api/v1/auth/email/login" 
+LOGIN_URL = "https://devbackend.succeedquiz.com/api/v1/auth/login" 
 UPLOAD_URL = "https://devbackend.succeedquiz.com/api/v1/upload"
 
 # Initialize CloudScraper to bypass Cloudflare protection
