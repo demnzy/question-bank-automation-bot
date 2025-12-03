@@ -7,8 +7,8 @@ import cloudscraper
 from fuzzywuzzy import fuzz
 
 # --- CONFIGURATION ---
-LOGIN_URL = "https://backend.succeedquiz.com/api/v1/auth/email/login"
-UPLOAD_URL = "https://backend.succeedquiz.com/api/v1/upload"
+LOGIN_URL = "https://devbackend.succeedquiz.com/api/v1/auth/login"
+UPLOAD_URL = "https://devbackend.succeedquiz.com/api/v1/upload"
 
 scraper = cloudscraper.create_scraper()
 
