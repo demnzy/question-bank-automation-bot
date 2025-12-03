@@ -38,11 +38,14 @@ jobs:
           wget --no-check-certificate -O "${SAFE_NAME}.xlsx" "${{ github.event.client_payload.excel_url }}"
           wget --no-check-certificate -O "${SAFE_NAME}.pdf" "${{ github.event.client_payload.pdf_url }}"
 
-      # --- STEP 2: RUN MINER (Custom URL Version) ---
+      # --- STEP 2: RUN MINER ---
       - name: Run Image Miner
         env:
           SUCCEED_EMAIL: ${{ secrets.SUCCEED_EMAIL }}
           SUCCEED_PASSWORD: ${{ secrets.SUCCEED_PASSWORD }}
+        run: |
+          # Usage: python image_miner.py [Excel] [PDF] [OutputJSON]
+          python image_miner.py "${{ env.EXAM_NAME }}.xlsx" "${{ env.EXAM_NAME }}.pdf" image_lookup.json
 
       # --- STEP 3: RUN TRANSFORMATION ---
       - name: Run Transformer
@@ -62,11 +65,10 @@ jobs:
       # --- STEP 4: SEND BACK TO N8N ---
       - name: Send Result to n8n
         run: |
-          # We use the N8N_UPLOAD_URL secret here if callback_url fails, 
-          # or as a fallback. 
-          # If you are using the dynamic callback from n8n, this step uses that.
-          # If you want to force it to use the stored secret:
+          # Get the callback URL from the n8n payload
           TARGET_URL="${{ github.event.client_payload.callback_url }}"
+          
+          # Upload final file back to n8n
           curl -X POST \
             -F "data=@${{ env.FINAL_FILE }}" \
             "$TARGET_URL"
