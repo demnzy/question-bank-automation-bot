@@ -1,0 +1,75 @@
+name: Exam Automation Bot
+
+on:
+  repository_dispatch:
+    types: [start-processing]
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      # --- STEP 1: DOWNLOAD & RENAME ---
+      - name: Download Files from n8n
+        run: |
+          # 1. Get Exam Name & Sanitize (Remove spaces/special chars)
+          RAW_NAME="${{ github.event.client_payload.collection_name }}"
+          SAFE_NAME=$(echo "$RAW_NAME" | sed 's/[^a-zA-Z0-9._-]//g')
+          
+          # Fallback name if empty
+          if [ -z "$SAFE_NAME" ]; then SAFE_NAME="Exam_Export"; fi
+          
+          # Save name to Environment Variable for next steps
+          echo "EXAM_NAME=$SAFE_NAME" >> $GITHUB_ENV
+          echo "Processing Exam: $SAFE_NAME"
+
+          # 2. Download files using the direct links n8n provided
+          wget --no-check-certificate -O "${SAFE_NAME}.xlsx" "${{ github.event.client_payload.excel_url }}"
+          wget --no-check-certificate -O "${SAFE_NAME}.pdf" "${{ github.event.client_payload.pdf_url }}"
+
+      # --- STEP 2: RUN MINER (Custom URL Version) ---
+      - name: Run Image Miner
+        env:
+          # This maps the Secret to the Python Environment Variable
+          SUCCEED_API_TOKEN: ${{ secrets.SUCCEED_API_TOKEN }}
+        run: |
+          # The script will now read the token from the env var above
+          python image_miner.py "${{ env.EXAM_NAME }}.xlsx" "${{ env.EXAM_NAME }}.pdf" image_lookup.json
+
+      # --- STEP 3: RUN TRANSFORMATION ---
+      - name: Run Transformer
+        run: |
+          OUTPUT_FILE="${{ env.EXAM_NAME }}_Final.xlsx"
+          
+          # Usage: python adapter.py --input [Excel] --output [Final] --template [Tpl] --lookup [JSON]
+          python main_az104_adapter.py \
+            --input "${{ env.EXAM_NAME }}.xlsx" \
+            --output "$OUTPUT_FILE" \
+            --template SQ_template.xlsx \
+            --lookup image_lookup.json
+            
+          # Save output filename to Env
+          echo "FINAL_FILE=$OUTPUT_FILE" >> $GITHUB_ENV
+
+      # --- STEP 4: SEND BACK TO N8N ---
+      - name: Send Result to n8n
+        run: |
+          # We use the N8N_UPLOAD_URL secret here if callback_url fails, 
+          # or as a fallback. 
+          # If you are using the dynamic callback from n8n, this step uses that.
+          # If you want to force it to use the stored secret:
+          TARGET_URL="${{ github.event.client_payload.callback_url }}"
+          curl -X POST \
+            -F "data=@${{ env.FINAL_FILE }}" \
+            "$TARGET_URL"
