@@ -41,11 +41,8 @@ jobs:
       # --- STEP 2: RUN MINER (Custom URL Version) ---
       - name: Run Image Miner
         env:
-          # This maps the Secret to the Python Environment Variable
-          SUCCEED_API_TOKEN: ${{ secrets.SUCCEED_API_TOKEN }}
-        run: |
-          # The script will now read the token from the env var above
-          python image_miner.py "${{ env.EXAM_NAME }}.xlsx" "${{ env.EXAM_NAME }}.pdf" image_lookup.json
+          SUCCEED_EMAIL: ${{ secrets.SUCCEED_EMAIL }}
+          SUCCEED_PASSWORD: ${{ secrets.SUCCEED_PASSWORD }}
 
       # --- STEP 3: RUN TRANSFORMATION ---
       - name: Run Transformer
