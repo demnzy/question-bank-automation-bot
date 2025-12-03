@@ -24,7 +24,7 @@ def upload_image_api(image_bytes, filename):
 
     # API CONFIGURATION
     files = [
-        ('file', (filename, image_bytes, 'image/png')) 
+        ('File', (filename, image_bytes, 'image/png')) 
     ]
 
     try:
