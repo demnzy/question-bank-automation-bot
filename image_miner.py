@@ -9,7 +9,7 @@ from fuzzywuzzy import fuzz
 # --- 1. UPLOAD FUNCTION (Custom API) ---
 def upload_image_api(image_bytes, filename):
     # YOUR CUSTOM API URL
-    url = "https://backend.succeedquiz.com/api/v1/upload"
+    url = "https://devbackend.succeedquiz.com/api/v1/upload"
     
     # READ TOKEN FROM SECRET (Security Best Practice)
     token = os.environ.get("SUCCEED_API_TOKEN")
