@@ -49,33 +49,24 @@ def upload_image_api(image_bytes, filename, token):
         # print(f"DEBUG: Response Body: {response.text[:300]}") # Print first 300 chars
         # --- DEBUG SECTION END ---
 
+        # 4. HANDLE RESPONSE
         if response.status_code in [200, 201]:
             data = response.json()
             
-            # 1. Try "url"
+            # CASE A: Your Specific Structure (files list)
+            # Structure: data -> files -> [0] -> url
+            if 'data' in data and 'files' in data['data']:
+                files_list = data['data']['files']
+                if isinstance(files_list, list) and len(files_list) > 0:
+                    return files_list[0].get('url')
+
+            # CASE B: Standard Fallbacks (just in case API changes)
             if 'url' in data: return data['url']
-            
-            # 2. Try "data.url" or "data.link"
             if 'data' in data and isinstance(data['data'], dict):
                 if 'url' in data['data']: return data['data']['url']
-                if 'link' in data['data']: return data['data']['link']
-                # NEW: Try "data" if it's a direct string
-                if isinstance(data['data'], str) and data['data'].startswith('http'):
-                    return data['data']
-
-            # 3. Try "secure_url" (Cloudinary style)
-            if 'secure_url' in data: return data['secure_url']
             
-            # If we get here, we connected but couldn't find the key
             print(f"  -> ERROR: Key not found! JSON structure: {data}")
             return None
-        else:
-            print(f"  -> API Error ({response.status_code}): {response.text}")
-            return None
-            
-    except Exception as e:
-        print(f"  -> Exception during upload: {e}")
-        return None
 
 def find_image_below_text(doc, text_query):
     best_match_page = -1
