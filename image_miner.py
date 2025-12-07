@@ -101,62 +101,64 @@ def upload_image_api(image_bytes, filename, token):
         return None
 
 def find_image_below_text(doc, text_query):
-    """
-    Finds the visual location of text, then looks for the nearest image below it.
-    """
+    query_short = str(text_query)[:100]
     best_match_page = -1
     best_rect = None
     highest_ratio = 0
-    # Sanitize query for fuzzy matching
-    query_short = str(text_query)[:100]
     
-    # 1. Find Text Location
+    # 1. Find Text
     for page_num, page in enumerate(doc):
         text_blocks = page.get_text("blocks")
         for block in text_blocks:
-            # Block structure: (x0, y0, x1, y1, "text", block_no, block_type)
-            block_text = block[4]
-            ratio = fuzz.partial_ratio(query_short, block_text)
-            
-            # Threshold 85% match
+            ratio = fuzz.partial_ratio(query_short, block[4])
             if ratio > 85 and ratio > highest_ratio:
                 highest_ratio = ratio
                 best_match_page = page_num
                 best_rect = fitz.Rect(block[:4])
 
-    if best_match_page == -1:
-        return None 
+    if best_match_page == -1: return None
 
-    # 2. Find Image Below on that Page
-    page = doc[best_match_page]
-    images = page.get_images(full=True)
+    # --- SEARCH STRATEGY ---
     
+    # Function to scan a specific page
+    def scan_page(page_idx, min_y, max_dist):
+        try:
+            page = doc[page_idx]
+        except IndexError: return None # End of doc
+        
+        images = page.get_images(full=True)
+        candidate = None
+        current_min_dist = max_dist
+        
+        for img in images:
+            xref = img[0]
+            rects = page.get_image_rects(xref)
+            if not rects: continue
+            rect = rects[0]
+            
+            # Check if image is below the threshold (min_y)
+            if rect.y0 >= min_y:
+                dist = rect.y0 - min_y
+                if dist < current_min_dist:
+                    current_min_dist = dist
+                    candidate = xref
+        return candidate
+
+    # 1. Look on SAME Page (Below text)
     text_bottom = best_rect.y1
-    candidate_xref = None
-    min_dist = 1000 # Max distance to look in pixels
+    found_xref = scan_page(best_match_page, text_bottom, 800) # Look down 800px
     
-    for img in images:
-        xref = img[0]
-        rects = page.get_image_rects(xref)
-        if not rects: continue
-        
-        # We take the first instance of the image on the page
-        img_rect = rects[0]
-        
-        # Check if image starts BELOW the text bottom
-        if img_rect.y0 >= text_bottom:
-            dist = img_rect.y0 - text_bottom
-            if dist < min_dist:
-                min_dist = dist
-                candidate_xref = xref
+    # 2. Look on NEXT Page (Top of page)
+    # If nothing found, check the very top of the next page (first 300px)
+    if not found_xref:
+        # print("  -> checking next page...") 
+        found_xref = scan_page(best_match_page + 1, 0, 300)
 
-    # 3. Extract
-    if candidate_xref:
-        base = doc.extract_image(candidate_xref)
-        return {
-            "bytes": base["image"],
-            "ext": base["ext"]
-        }
+    # 3. Extract if found
+    if found_xref:
+        base = doc.extract_image(found_xref)
+        return {"bytes": base["image"], "ext": base["ext"]}
+    
     return None
 
 def main():
