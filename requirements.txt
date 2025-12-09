@@ -6,3 +6,5 @@ fuzzywuzzy
 python-levenshtein
 xlsxwriter
 cloudscraper 
+pytesseract
+Pillow
