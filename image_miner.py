@@ -100,6 +100,28 @@ def upload_image_api(image_bytes, filename, token):
         print(f"  -> Exception during upload: {e}")
         return None
 
+# --- V2 FEATURE: OCR EXTRACTION ---
+def extract_text_from_image(image_bytes):
+    """
+    Uses Tesseract to read text from the image. 
+    Used for Drag & Drop questions where options are visual-only.
+    """
+    try:
+        # Load bytes into PIL Image
+        img = Image.open(BytesIO(image_bytes))
+        
+        # Run OCR
+        text = pytesseract.image_to_string(img)
+        
+        # Clean Result: Remove empty lines and join with semicolons
+        clean_lines = [line.strip() for line in text.split('\n') if line.strip()]
+        result = "; ".join(clean_lines)
+        
+        return result
+    except Exception as e:
+        print(f"  -> OCR Failed: {e}")
+        return None
+
 def find_image_below_text(doc, text_query):
     query_short = str(text_query)[:100]
     best_match_page = -1
@@ -118,59 +140,46 @@ def find_image_below_text(doc, text_query):
 
     if best_match_page == -1: return None
 
-    # --- SEARCH STRATEGY ---
-    
-    # Function to scan a specific page
-    def scan_page(page_idx, min_y, max_dist):
-        try:
-            page = doc[page_idx]
-        except IndexError: return None # End of doc
-        
+    # 2. Search Page for Image
+    def scan_page(page_idx, min_y):
+        try: page = doc[page_idx]
+        except IndexError: return None
         images = page.get_images(full=True)
-        candidate = None
-        current_min_dist = max_dist
+        candidate_xref = None
+        min_dist = 1000
         
         for img in images:
             xref = img[0]
             rects = page.get_image_rects(xref)
             if not rects: continue
-            rect = rects[0]
-            
-            # Check if image is below the threshold (min_y)
-            if rect.y0 >= min_y:
-                dist = rect.y0 - min_y
-                if dist < current_min_dist:
-                    current_min_dist = dist
-                    candidate = xref
-        return candidate
+            if rects[0].y0 >= min_y:
+                dist = rects[0].y0 - min_y
+                if dist < min_dist:
+                    min_dist = dist
+                    candidate_xref = xref
+        return candidate_xref
 
-    # 1. Look on SAME Page (Below text)
     text_bottom = best_rect.y1
-    found_xref = scan_page(best_match_page, text_bottom, 800) # Look down 800px
-    
-    # 2. Look on NEXT Page (Top of page)
-    # If nothing found, check the very top of the next page (first 300px)
-    if not found_xref:
-        # print("  -> checking next page...") 
-        found_xref = scan_page(best_match_page + 1, 0, 300)
+    # Check Same Page
+    xref = scan_page(best_match_page, text_bottom)
+    # If not found, Check Next Page Top
+    if not xref:
+        xref = scan_page(best_match_page + 1, 0)
 
-    # 3. Extract if found
-    if found_xref:
-        base = doc.extract_image(found_xref)
+    if xref:
+        base = doc.extract_image(xref)
         return {"bytes": base["image"], "ext": base["ext"]}
-    
     return None
 
 def main():
-    # Arguments passed by GitHub Actions YAML
+    # CLI Args
     input_excel = sys.argv[1]
     pdf_path = sys.argv[2]
     output_json = sys.argv[3]
 
-    # 1. Authenticate
     api_token = login_and_get_token()
-    if not api_token:
-        # Create empty file so next steps don't crash
+    if not api_token: 
+        # Fail gracefully
         with open(output_json, 'w') as f: json.dump({}, f)
         return
 
@@ -179,49 +188,60 @@ def main():
         df = pd.read_excel(input_excel)
         questions = df.to_dict(orient='records')
     except Exception as e:
-        print(f"Excel Read Error: {e}")
+        print(f"Excel Error: {e}")
         return
 
     try:
         doc = fitz.open(pdf_path)
     except Exception as e:
-        print(f"PDF Read Error: {e}")
+        print(f"PDF Error: {e}")
         return
 
     lookup_map = {}
-    print("Starting Image Mining...")
+    print("Starting V2 Image Miner...")
 
-    # 2. Loop through questions
     for i, q in enumerate(questions):
-        # Handle various boolean formats (True, "True", "true", "1")
-        has_img_val = q.get('has_image', False)
-        is_flagged = str(has_img_val).lower() in ['true', '1']
-        
-        if is_flagged:
-            q_text = str(q.get('Question', ''))
-            print(f"Searching Q{i}...")
-            
+        has_img = str(q.get('has_image', False)).lower() in ['true', '1']
+        q_text = str(q.get('Question', ''))
+        q_type = str(q.get('Question_Type', '')).lower()
+        q_options = str(q.get('Options', ''))
+
+        if has_img:
+            print(f"Processing Q{i}...")
             img_data = find_image_below_text(doc, q_text)
             
             if img_data:
+                # 1. Upload to Cloud
                 filename = f"q_{i}.{img_data['ext']}"
-                # Upload using the session token
                 url = upload_image_api(img_data['bytes'], filename, api_token)
                 
                 if url:
+                    lookup_map[q_text] = url # Standard Image Link
                     print(f"  -> Uploaded: {url}")
-                    # Save to map: Question Text -> Image URL
-                    lookup_map[q_text] = url
-                else:
-                    print("  -> Upload failed (Check logs)")
+                
+                # 2. V2 LOGIC: CHECK FOR DRAG & DROP
+                # Condition: It is Drag/Drop AND the Options column is empty/nan
+                is_drag_drop = "drag" in q_type or "drop" in q_type
+                is_options_missing = q_options == 'nan' or q_options.strip() == "" or q_options == "None"
+
+                if is_drag_drop and is_options_missing:
+                    print("  -> Drag/Drop with missing options detected. Running OCR...")
+                    ocr_result = extract_text_from_image(img_data['bytes'])
+                    
+                    if ocr_result:
+                        print(f"  -> OCR Success: {ocr_result[:30]}...")
+                        # Save OCR text with special key suffix
+                        lookup_map[q_text + "_OCR"] = ocr_result
+                    else:
+                        print("  -> OCR returned empty.")
             else:
                 print("  -> No image found visually below text")
 
-    # 3. Save Results
+    # Save
     with open(output_json, 'w', encoding='utf-8') as f:
         json.dump(lookup_map, f, indent=4)
     
-    print(f"Mining Complete. Saved {len(lookup_map)} images.")
+    print(f"Mining Complete. Saved {len(lookup_map)} entries.")
 
 if __name__ == "__main__":
     main()
