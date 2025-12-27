@@ -66,18 +66,20 @@ jobs:
           echo "FINAL_FILE=$OUTPUT_FILE" >> $GITHUB_ENV
 
       # --- STEP 4: SEND FILE BACK TO N8N ---
+# --- STEP 4: SEND RESULT TO N8N (FIXED) ---
       - name: Send Result to n8n
         run: |
           # Get the callback URL from the n8n payload
           TARGET_URL="${{ github.event.client_payload.callback_url }}"
           
-          # Upload final file back to n8n
-          # This triggers the "Wait" node to resume and accept the file
-          curl -X POST \
+          echo "Uploading to: $TARGET_URL"
+
+          # Added -L to follow redirects (Fixes 'Temporary Redirect' error)
+          # Added -v to see the debug logs if it fails again
+          curl -v -L -X POST \
             -F "data=@${{ env.FINAL_FILE }}" \
             -F "fileName=${{ env.FINAL_FILE }}" \
             "$TARGET_URL"
-
       # --- STEP 5: SAFETY NOTIFICATION (CRITICAL FIX) ---
       # This ensures n8n knows we are done even if the upload step above had a partial issue
       # or if you use a separate "Done" signal in future.
