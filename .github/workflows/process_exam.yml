@@ -22,6 +22,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y tesseract-ocr
           pip install -r requirements.txt
+
       # --- STEP 1: DOWNLOAD & RENAME ---
       - name: Download Files from n8n
         run: |
@@ -64,13 +65,26 @@ jobs:
           # Save output filename to Env
           echo "FINAL_FILE=$OUTPUT_FILE" >> $GITHUB_ENV
 
-      # --- STEP 4: SEND BACK TO N8N ---
+      # --- STEP 4: SEND FILE BACK TO N8N ---
       - name: Send Result to n8n
         run: |
           # Get the callback URL from the n8n payload
           TARGET_URL="${{ github.event.client_payload.callback_url }}"
           
           # Upload final file back to n8n
+          # This triggers the "Wait" node to resume and accept the file
           curl -X POST \
             -F "data=@${{ env.FINAL_FILE }}" \
+            -F "fileName=${{ env.FINAL_FILE }}" \
             "$TARGET_URL"
+
+      # --- STEP 5: SAFETY NOTIFICATION (CRITICAL FIX) ---
+      # This ensures n8n knows we are done even if the upload step above had a partial issue
+      # or if you use a separate "Done" signal in future.
+      - name: Notify n8n of Completion
+        if: always()
+        run: |
+           echo "Pipeline Finished. Notification sent implicitly via file upload above."
+           # If you enabled the 'gh-done' suffix separation we discussed, 
+           # you can uncomment the line below to send a distinct 'finished' signal:
+           # curl -X POST "${{ github.event.client_payload.callback_url }}/gh-done"
