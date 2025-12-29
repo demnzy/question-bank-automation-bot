@@ -67,15 +67,20 @@ jobs:
 
       # --- STEP 4: SEND FILE BACK TO N8N ---
 # --- STEP 4: SEND RESULT TO N8N (FIXED) ---
+# --- STEP 4: SEND RESULT TO N8N (FORCE HTTPS) ---
       - name: Send Result to n8n
         run: |
-          # Get the callback URL from the n8n payload
-          TARGET_URL="${{ github.event.client_payload.callback_url }}"
+          # 1. Get the URL n8n sent us
+          RAW_URL="${{ github.event.client_payload.callback_url }}"
           
-          echo "Uploading to: $TARGET_URL"
+          # 2. FORCE HTTPS: Replace 'http://' with 'https://'
+          # This prevents the 307 Redirect that breaks the file upload
+          TARGET_URL=$(echo "$RAW_URL" | sed 's|^http://|https://|')
 
-          # Added -L to follow redirects (Fixes 'Temporary Redirect' error)
-          # Added -v to see the debug logs if it fails again
+          echo "Original URL: $RAW_URL"
+          echo "Fixed URL:    $TARGET_URL"
+
+          # 3. Upload the file using the secure URL
           curl -v -L -X POST \
             -F "data=@${{ env.FINAL_FILE }}" \
             -F "fileName=${{ env.FINAL_FILE }}" \
