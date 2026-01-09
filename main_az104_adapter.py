@@ -6,6 +6,7 @@ Changes:
 - Added --lookup argument to accept the Image URL map from the Miner step.
 - Updated MediaURL logic to prioritize Cloudflare URLs over the "1" flag.
 - Configured for 14-column input schema.
+- FIXED: Expanded Option Regex to support A-Z (was A-J).
 """
 
 import argparse
@@ -106,20 +107,22 @@ def enforce_batches(df: pd.DataFrame, batch_size: int = 45) -> pd.DataFrame:
         d["Quiz"] = [f"Batch {i//batch_size+1}" if pd.isna(q) or str(q).strip()=="" else q for i, q in enumerate(d["Quiz"])]
     return d
 
+# --- UPDATE 1: Regex expanded A-Z ---
 def split_options(text: str) -> List[str]:
     if pd.isna(text) or not str(text).strip(): return []
     s = str(text).strip()
-    if re.search(r"\b[A-Ja-j]\)", s):
-        parts = re.split(r"\s*[;|]\s*(?=[A-Ja-j]\))", s)
-        cleaned = [re.sub(r"^[A-Ja-j]\)\s*", "", p).strip().strip(";") for p in parts if p.strip()]
+    if re.search(r"\b[A-Za-z]\)", s):
+        parts = re.split(r"\s*[;|]\s*(?=[A-Za-z]\))", s)
+        cleaned = [re.sub(r"^[A-Za-z]\)\s*", "", p).strip().strip(";") for p in parts if p.strip()]
         return [c for c in cleaned if c]
     parts = re.split(r"\s*[;|]\s*", s)
     return [p.strip() for p in parts if p.strip()]
 
+# --- UPDATE 2: Regex expanded A-Z ---
 def extract_correct_letters(correct: str) -> Set[str]:
     if pd.isna(correct) or not str(correct).strip(): return set()
     s = str(correct)
-    letters = set(re.findall(r"\b([A-Ja-j])\b", s))
+    letters = set(re.findall(r"\b([A-Za-z])\b", s))
     return {x.upper() for x in letters}
 
 def determine_type(qtype: str, options: List[str]) -> str:
@@ -305,7 +308,8 @@ def build_questions_and_options(df: pd.DataFrame, quiz_map: Dict[str, str], imag
                 correct = set()
             else:
                 s = str(correct_text).strip()
-                match = re.search(r"^([A-Ja-j])\)", s)
+                # --- UPDATE 3: Regex expanded A-Z ---
+                match = re.search(r"^([A-Za-z])\)", s)
                 if match: correct = {match.group(1).upper()}
                 
         elif qtype == "multiple_answer":
@@ -313,7 +317,8 @@ def build_questions_and_options(df: pd.DataFrame, quiz_map: Dict[str, str], imag
                 correct = set()
             else:
                 s = str(correct_text).strip()
-                letters = re.findall(r"(?:^|;\s*)([A-Ja-j])\)", s)
+                # --- UPDATE 4: Regex expanded A-Z ---
+                letters = re.findall(r"(?:^|;\s*)([A-Za-z])\)", s)
                 correct = {l.upper() for l in letters}
         else:
             correct = extract_correct_letters(correct_text)
