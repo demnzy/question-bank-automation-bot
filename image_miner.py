@@ -1,247 +1,165 @@
 import sys
 import json
 import os
+import re
 import fitz  # PyMuPDF
 import pandas as pd
-import cloudscraper 
-from fuzzywuzzy import fuzz
+import cloudscraper
+import pytesseract
+import time
+from PIL import Image
+from io import BytesIO
 
 # --- CONFIGURATION ---
-# Updated based on your successful login logs
-LOGIN_URL = "https://devbackend.succeedquiz.com/api/v1/auth/login" 
+LOGIN_URL = "https://devbackend.succeedquiz.com/api/v1/auth/login"
 UPLOAD_URL = "https://devbackend.succeedquiz.com/api/v1/upload"
 
-# Initialize CloudScraper to bypass Cloudflare protection
 scraper = cloudscraper.create_scraper()
 
+# ----------------- AUTH & UPLOAD -----------------
+
 def login_and_get_token():
-    print("Attempting to log in...")
     email = os.environ.get("SUCCEED_EMAIL")
     password = os.environ.get("SUCCEED_PASSWORD")
-    
-    if not email or not password:
-        print("Error: Missing Email/Password secrets in GitHub.")
-        return None
+    if not email or not password: return None
 
     try:
-        # payload for login
-        payload = {
-            "email": email,
-            "password": password
-        }
-        
-        response = scraper.post(LOGIN_URL, json=payload)
-        
+        response = scraper.post(LOGIN_URL, json={"email": email, "password": password})
         if response.status_code in [200, 201]:
-            data = response.json()
-            # Extract Token based on known API structure
-            if 'data' in data and 'accessToken' in data['data']:
-                print("Login Successful! Token acquired.")
-                return data['data']['accessToken']
-            else:
-                print(f"Login Failed: Token not found. Structure: {data.keys()}")
-                return None
-        else:
-            print(f"Login Failed ({response.status_code}): {response.text}")
-            return None
-            
-    except Exception as e:
-        print(f"Login Connection Error: {e}")
+            return response.json().get('data', {}).get('accessToken')
+        print(f"Login Failed: {response.status_code}")
         return None
+    except: return None
 
 def upload_image_api(image_bytes, filename, token):
-    headers = {
-        'Authorization': f'Bearer {token}'
-    }
-    
-    # Ensure filename has an extension
-    if "." not in filename: filename += ".png"
-
-    # File tuple for requests/scraper
-    files = [
-        ('file', (filename, image_bytes, 'image/png')) 
-    ]
+    headers = {'Authorization': f'Bearer {token}'}
+    if "." not in filename: filename += ".jpg"
+    files = [('file', (filename, image_bytes, 'image/jpeg'))]
 
     try:
         response = scraper.post(UPLOAD_URL, headers=headers, files=files)
-        
         if response.status_code in [200, 201]:
             data = response.json()
-            
-            # --- FIXED RESPONSE PARSING ---
-            # Your API returns: { data: { files: [ { url: "..." } ] } }
-            
-            # Logic 1: Check for the nested 'files' array
-            if 'data' in data and isinstance(data['data'], dict):
-                inner_data = data['data']
-                
-                # Check if 'files' list exists and has items
-                if 'files' in inner_data and isinstance(inner_data['files'], list):
-                    if len(inner_data['files']) > 0:
-                        return inner_data['files'][0].get('url')
-                
-                # Fallback: Check for direct 'url' in data object
-                if 'url' in inner_data: return inner_data['url']
-                if 'link' in inner_data: return inner_data['link']
-
-            # Logic 2: Check root level
+            if 'data' in data and 'files' in data['data']: return data['data']['files'][0].get('url')
             if 'url' in data: return data['url']
             if 'secure_url' in data: return data['secure_url']
-
-            # Debugging Output if we can't find it
-            print(f"  -> ERROR: URL key not found! Response: {data}")
-            return None
-            
-        else:
-            print(f"  -> API Error ({response.status_code}): {response.text}")
-            return None
-            
-    except Exception as e:
-        print(f"  -> Exception during upload: {e}")
         return None
+    except: return None
 
-# --- V2 FEATURE: OCR EXTRACTION ---
-def extract_text_from_image(image_bytes):
+# ----------------- COORDINATE CROPPER (SOURCE OF TRUTH) -----------------
+
+def crop_image_from_coords(doc, page_num, bbox_str):
     """
-    Uses Tesseract to read text from the image. 
-    Used for Drag & Drop questions where options are visual-only.
+    Precision Cropping using Cirrascale's BBOX (0-100 relative scale).
     """
     try:
-        # Load bytes into PIL Image
+        parts = [float(x.strip()) for x in bbox_str.split(',')]
+        if len(parts) != 4: return None
+        ymin, xmin, ymax, xmax = parts # Standard OLM output
+
+        page_idx = int(page_num) - 1 
+        if page_idx < 0 or page_idx >= len(doc): return None
+        
+        page = doc[page_idx]
+        w, h = page.rect.width, page.rect.height
+
+        clip_rect = fitz.Rect(
+            (max(0, xmin)/100)*w, (max(0, ymin)/100)*h,
+            (min(100, xmax)/100)*w, (min(100, ymax)/100)*h
+        )
+        # High DPI for clear Hotspots/Diagrams
+        return page.get_pixmap(clip=clip_rect, dpi=200).tobytes("jpg")
+    except: return None
+
+# ----------------- CONSOLIDATION / VERIFICATION -----------------
+
+def verify_and_rescue_text(image_bytes):
+    """
+    FALLBACK ONLY: If Cirrascale missed the text and gave an image instead,
+    we use Tesseract to consolidate the data.
+    """
+    try:
         img = Image.open(BytesIO(image_bytes))
-        
-        # Run OCR
         text = pytesseract.image_to_string(img)
-        
-        # Clean Result: Remove empty lines and join with semicolons
-        clean_lines = [line.strip() for line in text.split('\n') if line.strip()]
-        result = "; ".join(clean_lines)
-        
-        return result
-    except Exception as e:
-        print(f"  -> OCR Failed: {e}")
-        return None
+        # Format as semicolon list for the Options column
+        clean = [l.strip() for l in text.split('\n') if l.strip()]
+        return "; ".join(clean)
+    except: return None
 
-def find_image_below_text(doc, text_query):
-    query_short = str(text_query)[:100]
-    best_match_page = -1
-    best_rect = None
-    highest_ratio = 0
-    
-    # 1. Find Text
-    for page_num, page in enumerate(doc):
-        text_blocks = page.get_text("blocks")
-        for block in text_blocks:
-            ratio = fuzz.partial_ratio(query_short, block[4])
-            if ratio > 85 and ratio > highest_ratio:
-                highest_ratio = ratio
-                best_match_page = page_num
-                best_rect = fitz.Rect(block[:4])
-
-    if best_match_page == -1: return None
-
-    # 2. Search Page for Image
-    def scan_page(page_idx, min_y):
-        try: page = doc[page_idx]
-        except IndexError: return None
-        images = page.get_images(full=True)
-        candidate_xref = None
-        min_dist = 1000
-        
-        for img in images:
-            xref = img[0]
-            rects = page.get_image_rects(xref)
-            if not rects: continue
-            if rects[0].y0 >= min_y:
-                dist = rects[0].y0 - min_y
-                if dist < min_dist:
-                    min_dist = dist
-                    candidate_xref = xref
-        return candidate_xref
-
-    text_bottom = best_rect.y1
-    # Check Same Page
-    xref = scan_page(best_match_page, text_bottom)
-    # If not found, Check Next Page Top
-    if not xref:
-        xref = scan_page(best_match_page + 1, 0)
-
-    if xref:
-        base = doc.extract_image(xref)
-        return {"bytes": base["image"], "ext": base["ext"]}
-    return None
+# ----------------- MAIN -----------------
 
 def main():
-    # CLI Args
+    if len(sys.argv) < 5: return # Expects excel, pdf, coords, output
+
     input_excel = sys.argv[1]
     pdf_path = sys.argv[2]
-    output_json = sys.argv[3]
+    coord_path = sys.argv[3]
+    output_json = sys.argv[4]
 
-    api_token = login_and_get_token()
-    if not api_token: 
-        # Fail gracefully
-        with open(output_json, 'w') as f: json.dump({}, f)
-        return
+    token = login_and_get_token()
+    if not token: return
 
-    print(f"Reading Excel: {input_excel}")
     try:
         df = pd.read_excel(input_excel)
-        questions = df.to_dict(orient='records')
-    except Exception as e:
-        print(f"Excel Error: {e}")
-        return
-
-    try:
         doc = fitz.open(pdf_path)
-    except Exception as e:
-        print(f"PDF Error: {e}")
-        return
+        with open(coord_path, 'r', encoding='utf-8') as f:
+            raw = json.load(f)
+            coord_map = json.loads(raw) if isinstance(raw, str) else raw
+    except: return
 
-    lookup_map = {}
-    print("Starting V2 Image Miner...")
+    result_map = {} 
+    ref_pattern = re.compile(r"<<(IMAGE_REF_\d+)>>")
 
-    for i, q in enumerate(questions):
-        has_img = str(q.get('has_image', False)).lower() in ['true', '1']
-        q_text = str(q.get('Question', ''))
-        q_type = str(q.get('Question_Type', '')).lower()
-        q_options = str(q.get('Options', ''))
+    print(f"Consolidating V2 Data for {len(df)} questions...")
 
-        if has_img:
-            print(f"Processing Q{i}...")
-            img_data = find_image_below_text(doc, q_text)
-            
-            if img_data:
-                # 1. Upload to Cloud
-                filename = f"q_{i}.{img_data['ext']}"
-                url = upload_image_api(img_data['bytes'], filename, api_token)
-                
-                if url:
-                    lookup_map[q_text] = url # Standard Image Link
-                    print(f"  -> Uploaded: {url}")
-                
-                # 2. V2 LOGIC: CHECK FOR DRAG & DROP
-                # Condition: It is Drag/Drop AND the Options column is empty/nan
-                is_drag_drop = "drag" in q_type or "drop" in q_type
-                is_options_missing = q_options == 'nan' or q_options.strip() == "" or q_options == "None"
+    for idx, row in df.iterrows():
+        q_text_raw = str(row.get('Question', ''))
+        # Clean text for mapping (stripping tokens)
+        q_text_clean = re.sub(r"<<IMAGE_REF_\d+>>", "", q_text_raw).strip()
+        
+        q_type = str(row.get('Question_Type', '')).lower()
+        q_options = str(row.get('Options', ''))
 
-                if is_drag_drop and is_options_missing:
-                    print("  -> Drag/Drop with missing options detected. Running OCR...")
-                    ocr_result = extract_text_from_image(img_data['bytes'])
+        # Check for Image References (Source of Truth)
+        matches = ref_pattern.findall(q_text_raw)
+        
+        if matches:
+            for ref_id in matches:
+                if ref_id in coord_map:
+                    # 1. Retrieve Data from Source of Truth
+                    meta = coord_map[ref_id]
+                    img_bytes = crop_image_from_coords(doc, meta.get('page', 1), meta.get('coordinates', ''))
                     
-                    if ocr_result:
-                        print(f"  -> OCR Success: {ocr_result[:30]}...")
-                        # Save OCR text with special key suffix
-                        lookup_map[q_text + "_OCR"] = ocr_result
-                    else:
-                        print("  -> OCR returned empty.")
-            else:
-                print("  -> No image found visually below text")
+                    if img_bytes:
+                        # 2. Universal Upload (Hotspots, Exhibits, etc.)
+                        url = upload_image_api(img_bytes, f"q{idx+1}_{ref_id}.jpg", token)
+                        if url:
+                            print(f"Q{idx+1}: Image Mapped -> {url}")
+                            result_map[q_text_raw] = url
+                            result_map[q_text_clean] = url
 
-    # Save
+                        # 3. CONSOLIDATION CHECK (The "Verification" Step)
+                        # Did Cirrascale treat a text box as an image by mistake?
+                        is_drag_drop = "drag" in q_type or "drop" in q_type
+                        is_empty_options = q_options == 'nan' or not q_options.strip()
+
+                        if is_drag_drop and is_empty_options:
+                            print(f"  [WARN] Q{idx+1}: Drag/Drop options missing! Cirrascale gave image instead of text.")
+                            print(f"  -> Attempting Tesseract Rescue...")
+                            
+                            rescued_text = verify_and_rescue_text(img_bytes)
+                            if rescued_text:
+                                # Save with _OCR suffix for Universal Miner to pick up
+                                result_map[q_text_raw + "_OCR"] = rescued_text
+                                print(f"  -> Rescued Text: {rescued_text[:40]}...")
+                            else:
+                                print(f"  -> Rescue Failed. Question may need manual review.")
+
+    # Save Final Map
     with open(output_json, 'w', encoding='utf-8') as f:
-        json.dump(lookup_map, f, indent=4)
-    
-    print(f"Mining Complete. Saved {len(lookup_map)} entries.")
+        json.dump(result_map, f, indent=4)
+
+    print(f"Consolidation Complete. Output: {output_json}")
 
 if __name__ == "__main__":
     main()
