@@ -19,17 +19,29 @@ scraper = cloudscraper.create_scraper()
 # ----------------- AUTH & UPLOAD -----------------
 
 def login_and_get_token():
-    email = os.environ.get("SUCCEED_EMAIL")
-    password = os.environ.get("SUCCEED_PASSWORD")
-    if not email or not password: return None
+    # --- HARDCODED CREDENTIALS ---
+    email = "odavies@readwriteds.com"
+    password = "2862008June28?"
+    
+    if not email or not password: 
+        print("Missing hardcoded email or password.")
+        return None
 
     try:
         response = scraper.post(LOGIN_URL, json={"email": email, "password": password})
+        
+        # Check for success
         if response.status_code in [200, 201]:
+            print("✅ Login Successful!")
             return response.json().get('data', {}).get('accessToken')
-        print(f"Login Failed: {response.status_code}")
+            
+        # If it fails, print the exact reason the server rejected it
+        print(f"❌ Login Failed: {response.status_code} - {response.text}")
         return None
-    except: return None
+        
+    except Exception as e:
+        print(f"❌ Login Exception occurred: {e}")
+        return None
 
 def upload_image_api(image_bytes, filename, token):
     headers = {'Authorization': f'Bearer {token}'}
@@ -89,7 +101,9 @@ def verify_and_rescue_text(image_bytes):
 # ----------------- MAIN -----------------
 
 def main():
-    if len(sys.argv) < 5: return # Expects excel, pdf, coords, output
+    if len(sys.argv) < 5: 
+        print("❌ Missing arguments. Expects: excel, pdf, coords, output")
+        return 
 
     input_excel = sys.argv[1]
     pdf_path = sys.argv[2]
@@ -97,15 +111,24 @@ def main():
     output_json = sys.argv[4]
 
     token = login_and_get_token()
-    if not token: return
+    if not token: 
+        print("❌ Exiting: Could not obtain auth token.")
+        return
 
+    # --- AGGRESSIVE ERROR HANDLING ---
     try:
         df = pd.read_excel(input_excel)
         doc = fitz.open(pdf_path)
         with open(coord_path, 'r', encoding='utf-8') as f:
             raw = json.load(f)
             coord_map = json.loads(raw) if isinstance(raw, str) else raw
-    except: return
+            print(f"✅ Loaded {len(coord_map)} entries from coords.json")
+    except Exception as e:
+        print(f"\n🚨 CRITICAL ERROR LOADING FILES 🚨\n{e}\n")
+        # Output empty JSON so downstream processes don't hard crash
+        with open(output_json, 'w', encoding='utf-8') as f:
+            json.dump({}, f)
+        return
 
     result_map = {} 
     ref_pattern = re.compile(r"<<(IMAGE_REF_\d+)>>")
