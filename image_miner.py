@@ -1,14 +1,8 @@
 import sys
 import json
-import os
-import re
 import fitz  # PyMuPDF
 import pandas as pd
 import cloudscraper
-import pytesseract
-import time
-from PIL import Image
-from io import BytesIO
 
 # --- CONFIGURATION ---
 LOGIN_URL = "https://devbackend.succeedquiz.com/api/v1/auth/login"
@@ -29,16 +23,12 @@ def login_and_get_token():
 
     try:
         response = scraper.post(LOGIN_URL, json={"email": email, "password": password})
-        
-        # Check for success
         if response.status_code in [200, 201]:
             print("✅ Login Successful!")
             return response.json().get('data', {}).get('accessToken')
             
-        # If it fails, print the exact reason the server rejected it
         print(f"❌ Login Failed: {response.status_code} - {response.text}")
         return None
-        
     except Exception as e:
         print(f"❌ Login Exception occurred: {e}")
         return None
@@ -58,131 +48,96 @@ def upload_image_api(image_bytes, filename, token):
         return None
     except: return None
 
-# ----------------- COORDINATE CROPPER (SOURCE OF TRUTH) -----------------
+# ----------------- NATIVE PDF EXTRACTION (V1 LOGIC) -----------------
 
-def crop_image_from_coords(doc, page_num, bbox_str):
+def extract_all_native_images(pdf_path):
     """
-    Precision Cropping using Cirrascale's BBOX (0-100 relative scale).
+    V1 Logic: Scans the PDF and extracts all natively embedded images in order.
+    Does NOT rely on CirraScale or coordinates.
     """
-    try:
-        parts = [float(x.strip()) for x in bbox_str.split(',')]
-        if len(parts) != 4: return None
-        ymin, xmin, ymax, xmax = parts # Standard OLM output
-
-        page_idx = int(page_num) - 1 
-        if page_idx < 0 or page_idx >= len(doc): return None
+    doc = fitz.open(pdf_path)
+    extracted_images = []
+    
+    for page_index in range(len(doc)):
+        page = doc[page_index]
+        image_list = page.get_images(full=True)
         
-        page = doc[page_idx]
-        w, h = page.rect.width, page.rect.height
-
-        clip_rect = fitz.Rect(
-            (max(0, xmin)/100)*w, (max(0, ymin)/100)*h,
-            (min(100, xmax)/100)*w, (min(100, ymax)/100)*h
-        )
-        # High DPI for clear Hotspots/Diagrams
-        return page.get_pixmap(clip=clip_rect, dpi=200).tobytes("jpg")
-    except: return None
-
-# ----------------- CONSOLIDATION / VERIFICATION -----------------
-
-def verify_and_rescue_text(image_bytes):
-    """
-    FALLBACK ONLY: If Cirrascale missed the text and gave an image instead,
-    we use Tesseract to consolidate the data.
-    """
-    try:
-        img = Image.open(BytesIO(image_bytes))
-        text = pytesseract.image_to_string(img)
-        # Format as semicolon list for the Options column
-        clean = [l.strip() for l in text.split('\n') if l.strip()]
-        return "; ".join(clean)
-    except: return None
+        for img_index, img in enumerate(image_list):
+            xref = img[0]
+            base_image = doc.extract_image(xref)
+            image_bytes = base_image["image"]
+            extracted_images.append(image_bytes)
+            
+    print(f"✅ Found {len(extracted_images)} native images embedded in the PDF.")
+    return extracted_images
 
 # ----------------- MAIN -----------------
 
 def main():
-    if len(sys.argv) < 5: 
-        print("❌ Missing arguments. Expects: excel, pdf, coords, output")
+    # V1 usually only expects 3 arguments, but we accept 4 just in case 
+    # your GitHub Actions workflow still passes the 'coords.json' argument.
+    if len(sys.argv) < 4: 
+        print("❌ Missing arguments. Expects: excel, pdf, output")
         return 
 
     input_excel = sys.argv[1]
     pdf_path = sys.argv[2]
-    coord_path = sys.argv[3]
-    output_json = sys.argv[4]
+    # Handle both 3-arg and 4-arg setups seamlessly
+    output_json = sys.argv[4] if len(sys.argv) == 5 else sys.argv[3]
 
     token = login_and_get_token()
     if not token: 
         print("❌ Exiting: Could not obtain auth token.")
         return
 
-    # --- AGGRESSIVE ERROR HANDLING ---
     try:
         df = pd.read_excel(input_excel)
-        doc = fitz.open(pdf_path)
-        with open(coord_path, 'r', encoding='utf-8') as f:
-            raw = json.load(f)
-            coord_map = json.loads(raw) if isinstance(raw, str) else raw
-            print(f"✅ Loaded {len(coord_map)} entries from coords.json")
+        # Extract all images from the PDF upfront
+        available_images = extract_all_native_images(pdf_path)
     except Exception as e:
         print(f"\n🚨 CRITICAL ERROR LOADING FILES 🚨\n{e}\n")
-        # Output empty JSON so downstream processes don't hard crash
-        with open(output_json, 'w', encoding='utf-8') as f:
-            json.dump({}, f)
+        with open(output_json, 'w', encoding='utf-8') as f: json.dump({}, f)
         return
 
     result_map = {} 
-    ref_pattern = re.compile(r"<<(IMAGE_REF_\d+)>>")
+    image_counter = 0
 
-    print(f"Consolidating V2 Data for {len(df)} questions...")
+    print(f"\n--- Starting V1 Native Image Mapping ---")
 
     for idx, row in df.iterrows():
         q_text_raw = str(row.get('Question', ''))
-        # Clean text for mapping (stripping tokens)
-        q_text_clean = re.sub(r"<<IMAGE_REF_\d+>>", "", q_text_raw).strip()
         
-        q_type = str(row.get('Question_Type', '')).lower()
-        q_options = str(row.get('Options', ''))
-
-        # Check for Image References (Source of Truth)
-        matches = ref_pattern.findall(q_text_raw)
+        # V1 Logic: Check the LLM's 'has_image' flag
+        has_image_raw = str(row.get('has_image', '')).lower()
+        is_has_image_true = has_image_raw in ['true', '1', 'yes']
         
-        if matches:
-            for ref_id in matches:
-                if ref_id in coord_map:
-                    # 1. Retrieve Data from Source of Truth
-                    meta = coord_map[ref_id]
-                    img_bytes = crop_image_from_coords(doc, meta.get('page', 1), meta.get('coordinates', ''))
-                    
-                    if img_bytes:
-                        # 2. Universal Upload (Hotspots, Exhibits, etc.)
-                        url = upload_image_api(img_bytes, f"q{idx+1}_{ref_id}.jpg", token)
-                        if url:
-                            print(f"Q{idx+1}: Image Mapped -> {url}")
-                            result_map[q_text_raw] = url
-                            result_map[q_text_clean] = url
-
-                        # 3. CONSOLIDATION CHECK (The "Verification" Step)
-                        # Did Cirrascale treat a text box as an image by mistake?
-                        is_drag_drop = "drag" in q_type or "drop" in q_type
-                        is_empty_options = q_options == 'nan' or not q_options.strip()
-
-                        if is_drag_drop and is_empty_options:
-                            print(f"  [WARN] Q{idx+1}: Drag/Drop options missing! Cirrascale gave image instead of text.")
-                            print(f"  -> Attempting Tesseract Rescue...")
-                            
-                            rescued_text = verify_and_rescue_text(img_bytes)
-                            if rescued_text:
-                                # Save with _OCR suffix for Universal Miner to pick up
-                                result_map[q_text_raw + "_OCR"] = rescued_text
-                                print(f"  -> Rescued Text: {rescued_text[:40]}...")
-                            else:
-                                print(f"  -> Rescue Failed. Question may need manual review.")
+        if is_has_image_true:
+            if image_counter < len(available_images):
+                # Pop the next available image in the sequence
+                img_bytes = available_images[image_counter]
+                image_counter += 1
+                
+                url = upload_image_api(img_bytes, f"q{idx+1}_v1_auto.jpg", token)
+                
+                if url:
+                    print(f"✅ Q{idx+1}: Image Uploaded -> {url}")
+                    result_map[q_text_raw] = url
+                else:
+                    print(f"❌ Q{idx+1}: Upload Failed to Succeed Quiz backend.")
+            else:
+                print(f"⚠️ Q{idx+1}: Flagged 'has_image=True', but ran out of images in the PDF!")
 
     # Save Final Map
     with open(output_json, 'w', encoding='utf-8') as f:
         json.dump(result_map, f, indent=4)
 
-    print(f"Consolidation Complete. Output: {output_json}")
+    print("\n" + "="*40)
+    print("📊 V1 IMAGE MINER SUMMARY")
+    print("="*40)
+    print(f"Total Native Images Found: {len(available_images)}")
+    print(f"Total Images Mapped      : {image_counter}")
+    print(f"Successfully Uploaded    : {len(result_map)}")
+    print("="*40 + "\n")
 
 if __name__ == "__main__":
     main()
