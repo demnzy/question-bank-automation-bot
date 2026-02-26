@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-main_az104_adapter.py (GitHub Actions Edition)
+main_az104_adapter.py (GitHub Actions Edition - Aggressive Compliance)
 
 Changes:
+- Added aggressive sanitization: Null eradication, Overlap Deduplication, Hallucination filtering.
 - Added --lookup argument to accept the Image URL map from the Miner step.
 - Updated MediaURL logic to prioritize Cloudflare URLs over the "1" flag.
 - Configured for 14-column input schema.
-- FIXED: Expanded Option Regex to support A-Z (was A-J).
+- Expanded Option Regex to support A-Z (was A-J).
 """
 
 import argparse
 import re
 import json
+import hashlib
 import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Set
@@ -28,6 +30,12 @@ DEFAULT_PASSMARK = 70
 DEFAULT_POINTS = 1
 
 # --------------------- HELPERS ---------------------
+
+def generate_robust_fingerprint(text: str) -> str:
+    """Creates a collision-resistant hash ignoring whitespace, case, and punctuation."""
+    if not text or pd.isna(text): return ""
+    normalized = re.sub(r'[\W_]+', '', str(text).lower())
+    return hashlib.md5(normalized.encode()).hexdigest()
 
 def slugify(text: str) -> str:
     tokens = re.sub(r"[^A-Za-z0-9]+", " ", str(text)).strip().split()
@@ -100,14 +108,12 @@ def ensure_required_metadata(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 def enforce_batches(df: pd.DataFrame, batch_size: int = 45) -> pd.DataFrame:
-    # Logic is mainly handled in n8n now, but this acts as a fallback
     d = df.copy()
     if d["Quiz"].isna().any() or (d["Quiz"].astype(str).str.strip() == "").any():
         total = len(d)
         d["Quiz"] = [f"Batch {i//batch_size+1}" if pd.isna(q) or str(q).strip()=="" else q for i, q in enumerate(d["Quiz"])]
     return d
 
-# --- UPDATE 1: Regex expanded A-Z ---
 def split_options(text: str) -> List[str]:
     if pd.isna(text) or not str(text).strip(): return []
     s = str(text).strip()
@@ -118,7 +124,6 @@ def split_options(text: str) -> List[str]:
     parts = re.split(r"\s*[;|]\s*", s)
     return [p.strip() for p in parts if p.strip()]
 
-# --- UPDATE 2: Regex expanded A-Z ---
 def extract_correct_letters(correct: str) -> Set[str]:
     if pd.isna(correct) or not str(correct).strip(): return set()
     s = str(correct)
@@ -133,6 +138,7 @@ def determine_type(qtype: str, options: List[str]) -> str:
         return "true_false"
     return "multiple_choice" if options else "text_input"
 
+# --- UPDATED: Aggressive Sanitization and Compliance ---
 def load_agent_input(path: Path) -> pd.DataFrame:
     suffix = path.suffix.lower()
     if suffix in {".xlsx", ".xls"}:
@@ -148,6 +154,25 @@ def load_agent_input(path: Path) -> pd.DataFrame:
         raise ValueError(f"Unsupported input type: {suffix}")
     
     df = normalize_columns(df)
+    
+    print("\n--- Running Aggressive Data Sanitization ---")
+    
+    # 1. THE NULL ERADICATOR
+    df = df.replace(to_replace=r'(?i)^null$', value='', regex=True)
+    
+    # 2. OVERLAP DEDUPLICATION
+    df['QuestionHash'] = df['Question'].apply(lambda x: generate_robust_fingerprint(str(x)))
+    original_count = len(df)
+    df = df.drop_duplicates(subset=['QuestionHash'], keep='first')
+    print(f"✓ Dropped {original_count - len(df)} duplicate questions caused by chunk overlap.")
+    
+    # 3. THE HALLUCINATION FILTER
+    opts_before = len(df)
+    df = df.dropna(subset=['Options'])
+    df = df[df['Options'].astype(str).str.strip() != '']
+    print(f"✓ Dropped {opts_before - len(df)} hallucinated items missing options.")
+    print("--------------------------------------------\n")
+    
     df = df.loc[~df["Question_Type"].astype(str).str.contains(r"hotspot|drag|simulation", case=False, na=False)].copy()
     df = ensure_required_metadata(df)
     df = enforce_batches(df, 45)
@@ -268,7 +293,6 @@ def build_quizzes_df(df: pd.DataFrame, quiz_map: Dict[str, str], collection_key:
         })
     return pd.DataFrame(rows)
 
-# --- MODIFIED: Added image_lookup argument ---
 def build_questions_and_options(df: pd.DataFrame, quiz_map: Dict[str, str], image_lookup: Dict[str, str]):
     q_rows = []
     o_rows = []
@@ -308,7 +332,6 @@ def build_questions_and_options(df: pd.DataFrame, quiz_map: Dict[str, str], imag
                 correct = set()
             else:
                 s = str(correct_text).strip()
-                # --- UPDATE 3: Regex expanded A-Z ---
                 match = re.search(r"^([A-Za-z])\)", s)
                 if match: correct = {match.group(1).upper()}
                 
@@ -317,7 +340,6 @@ def build_questions_and_options(df: pd.DataFrame, quiz_map: Dict[str, str], imag
                 correct = set()
             else:
                 s = str(correct_text).strip()
-                # --- UPDATE 4: Regex expanded A-Z ---
                 letters = re.findall(r"(?:^|;\s*)([A-Za-z])\)", s)
                 correct = {l.upper() for l in letters}
         else:
@@ -331,7 +353,7 @@ def build_questions_and_options(df: pd.DataFrame, quiz_map: Dict[str, str], imag
             "Points": DEFAULT_POINTS,
             "Explanation": r.get("Explanation", ""),
             "Hints": clean_hint_text(r.get("Hints", "")),
-            "MediaURL": media_val, # Holds URL or "1"
+            "MediaURL": media_val,
             "OrderIndex": idx,
             "ThresholdKeywords": ""
         })
@@ -425,8 +447,8 @@ def main():
     save_to_workbook(Path(args.output), cats_df, cols_df, quizzes_df, questions_df, options_df, schemas)
     
     print("Transformation Complete ✓")
-    print(f"Total Questions: {len(df)}")
-    print(f"Batches: {df['Quiz'].nunique()}")
+    print(f"Total Cleaned Questions: {len(df)}")
+    print(f"Batches Generated: {df['Quiz'].nunique()}")
     print(f"Output: {args.output}")
 
 if __name__ == "__main__":
